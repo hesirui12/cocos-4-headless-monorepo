@@ -84,6 +84,42 @@ class UpdateRepo {
     }
 
     /**
+     * 检查本地 HEAD 是否已匹配目标 tag（避免对大仓库执行全量 fetch 导致卡死）
+     * @returns {boolean} 已匹配返回 true
+     */
+    isHeadAlreadyAtTarget(targetDir, tag) {
+        if (!tag) return false;
+        try {
+            const head = this.execCommand('git rev-parse HEAD', targetDir).toString().trim();
+            // 本地可能已有该 tag（浅克隆/部分克隆时 tag 对象不一定存在，用 ls-remote 对比远程 hash 更稳）
+            const remoteRef = execSync(
+                `git ls-remote --tags ${this.getRepoUrl(targetDir)} ${tag}`, 
+                { encoding: 'utf8', timeout: 30000 }
+            ).trim().split(/\s+/)[0];
+            if (!remoteRef) return false;
+            const localTag = this.execCommand(`git rev-parse ${tag} 2>nul || git rev-parse origin/${tag} 2>nul || echo none`, targetDir).toString().trim();
+            if (localTag !== 'none' && localTag === remoteRef) {
+                console.log(`本地 HEAD 已匹配 tag ${tag}，跳过 fetch`);
+                return true;
+            }
+            return false;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * 获取仓库地址（从 remote origin 反查，或使用 repo.json 中的地址）
+     */
+    getRepoUrl(targetDir) {
+        try {
+            return this.execCommand('git remote get-url origin', targetDir).toString().trim();
+        } catch (error) {
+            return '';
+        }
+    }
+
+    /**
      * 更新已存在的仓库
      */
     async updateExistingRepository(key, config, targetDir) {
@@ -95,6 +131,11 @@ class UpdateRepo {
             console.log(`目录 ${targetDir} 不是 git 仓库，将删除并重新克隆`);
             fs.rmSync(targetDir, { recursive: true, force: true });
             return false; // 返回 false 表示需要重新克隆
+        }
+
+        // 本地 HEAD 已匹配目标 tag 时直接跳过（大仓库优化，避免 fetch 卡死）
+        if (this.isHeadAlreadyAtTarget(targetDir, tag)) {
+            return true;
         }
 
         try {
@@ -113,9 +154,13 @@ class UpdateRepo {
             console.log('还原有 git 记录的文件改动...');
             this.execCommand('git reset --hard HEAD', targetDir);
 
-            // 获取远程更新
+            // 获取远程更新：只拉目标 tag，不拉全量 tags（避免大仓库卡死）
             console.log('获取远程更新...');
-            this.execCommand('git fetch origin --tags --force', targetDir);
+            if (tag) {
+                this.execCommand(`git fetch origin tag ${tag} --force`, targetDir);
+            } else {
+                this.execCommand('git fetch origin --tags --force', targetDir);
+            }
 
             // 切换到指定分支或标签并更新
             if (branch) {
@@ -175,19 +220,19 @@ class UpdateRepo {
         }
 
         try {
-            // 克隆仓库
+            // 克隆仓库（大仓库使用部分克隆 --filter=blob:none，仅拉取文件树，blob 按需下载，避免下载超时）
             console.log(`开始克隆仓库: ${key}`);
 
             // 切换到指定分支或标签
             if (branch) {
                 console.log(`clone branch: ${branch}`);
-                this.execCommand(`git clone -b ${branch} ${repo} ${targetDir}`);
+                this.execCommand(`git clone -b ${branch} --filter=blob:none ${repo} ${targetDir}`);
             } else if (tag) {
                 console.log(`clone tag: ${tag}`);
-                this.execCommand(`git clone -b ${tag} --depth 1 ${repo} ${targetDir}`);
+                this.execCommand(`git clone -b ${tag} --depth 1 --filter=blob:none ${repo} ${targetDir}`);
             } else {
                 console.log('clone default branch');
-                this.execCommand(`git clone ${repo} ${targetDir}`);
+                this.execCommand(`git clone --filter=blob:none ${repo} ${targetDir}`);
             }
 
             console.log(`仓库 ${key} 克隆完成`);
@@ -205,7 +250,8 @@ class UpdateRepo {
         console.log('开始执行下载引擎工作流...');
 
         const repoConfig = this.readRepoConfig();
-        const repositories = Object.keys(repoConfig);
+        // 过滤以下划线开头（如 _comment）的非仓库配置项
+        const repositories = Object.keys(repoConfig).filter((key) => !key.startsWith('_'));
 
         if (repositories.length === 0) {
             console.log('没有找到需要克隆的仓库配置');

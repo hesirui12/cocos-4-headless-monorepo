@@ -17,7 +17,14 @@ tsconfig.tsbuildinfo
 # node 模块
 **/node_modules/
 **/yarn.lock
-packages/engine/
+
+# engine 已纳入 monorepo（源码进版本库），仅排除构建产物与外部二进制
+packages/engine/bin/
+packages/engine/native/external/
+packages/engine/scripts/native-pack-tool/dist/
+packages/engine/DebugInfos.json
+packages/engine/native/tools/swig/bin/
+packages/engine/native/tools/bindings-generator/dist/
 
 # packages
 packages/cc-module/editor

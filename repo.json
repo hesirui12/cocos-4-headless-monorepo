@@ -1,9 +1,5 @@
 {
-    "engine": {
-        "repo": "https://github.com/cocos/cocos4.git",
-        "dist": "packages/engine",
-        "tag": "4.0.0-alpha.29"
-    },
+    "_comment": "engine (cocos4) 已作为 monorepo 的一部分纳入版本库，见 packages/engine，不再通过脚本克隆。external 为 3GB+ 的第三方预编译原生 SDK，体积过大不进入 git，由 update-repo.js 脚本按需拉取。",
     "external": {
         "repo": "https://github.com/cocos/cocos-engine-external.git",
         "dist": "packages/engine/native/external",

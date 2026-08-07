@@ -1,0 +1,52 @@
+# 临时文件
+# 忽略所有 . 开头的目录，除了以下特殊制定的文件夹
+.*/
+!.vscode/
+!.github/
+!.husky/
+.vscode/extensions.json
+.vscode/launch.json
+.vscode/*.code-workspace
+.user.json
+.DS_Store
+.temp
+
+# tsconfig
+tsconfig.tsbuildinfo
+
+# node 模块
+**/node_modules/
+**/yarn.lock
+packages/engine/
+
+# packages
+packages/cc-module/editor
+packages/platforms/
+packages/cocos-cli-types/**/*
+
+# static
+static/tools/
+static/web/scene-bundle.js
+static/web/scene-bundle.js.map
+static/web/polyfills.bundle.js
+static/web/editor-extends.bundle.js
+
+# 构建文件
+/dist
+src/core/builder/platforms/*/dist
+
+# jest
+coverage
+bin
+
+# test project
+e2e/.workspace/
+e2e/reports/
+
+# auto generated files
+src/i18n/types/generated.d.ts
+CLAUDE.md
+config.local.json
+
+# 个人/本机配置（local 作用域），不进版本库
+profiles/cocos.config.json

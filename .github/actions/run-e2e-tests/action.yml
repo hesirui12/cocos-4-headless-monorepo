@@ -1,0 +1,69 @@
+name: 'Run E2E Tests'
+description: '运行 E2E 测试并生成报告'
+
+inputs:
+  report-server-url:
+    description: '报告服务器地址'
+    required: true
+    default: 'http://192.168.52.77:8080'
+  debug:
+    description: '是否以 debug 模式运行 E2E 测试（使用 npm run test:e2e:debug）'
+    required: false
+    default: 'false'
+
+outputs:
+  report_exists:
+    description: '测试报告是否存在'
+    value: ${{ steps.find-report.outputs.report_exists }}
+  report_url:
+    description: '测试报告 URL'
+    value: ${{ steps.find-report.outputs.report_url }}
+  report_filename:
+    description: '测试报告文件名'
+    value: ${{ steps.find-report.outputs.report_filename }}
+  report_file:
+    description: '测试报告文件路径'
+    value: ${{ steps.find-report.outputs.report_file }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run E2E tests
+      id: run-tests
+      shell: bash
+      # 即使测试失败也继续执行后续步骤（查找报告）
+      continue-on-error: true
+      run: |
+        if [ "${{ inputs.debug }}" = "true" ]; then
+          echo "Running E2E tests in DEBUG mode..."
+          npm run test:e2e:debug
+        else
+          echo "Running E2E tests in normal mode..."
+          npm run test:e2e
+        fi
+    
+    - name: Archive E2E logs
+      shell: bash
+      run: |
+        if [ -d "temp/logs" ]; then
+          mkdir -p e2e/logs
+          LOG_DIR="e2e/logs/$(date +%Y-%m-%d_%H-%M-%S)"
+          mkdir -p "$LOG_DIR"
+          cp -r temp/logs/* "$LOG_DIR"/ || true
+          echo "E2E logs archived to $LOG_DIR"
+        else
+          echo "No temp/logs directory found, skip archiving."
+        fi
+
+    - name: Find test report file
+      id: find-report
+      shell: bash
+      # 无论测试成功或失败，都查找报告
+      if: always()
+      run: node .github/scripts/find-test-report.js
+    
+    - name: Check test result
+      shell: bash
+      # 如果测试失败，在找到报告后再标记失败
+      if: steps.run-tests.outcome == 'failure'
+      run: exit 1

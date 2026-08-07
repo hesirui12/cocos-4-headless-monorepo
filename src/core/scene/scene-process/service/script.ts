@@ -1,0 +1,290 @@
+import cc from 'cc';
+import { Executor } from '@cocos/lib-programming/dist/executor';
+import { QuickPackLoaderContext } from '@cocos/creator-programming-quick-pack/lib/loader';
+import { Rpc } from '../rpc';
+import { BaseService, register } from './core';
+import { IScriptEvents, IScriptService } from '../../common';
+import utils from '../../../base/utils';
+import i18n from '../i18n';
+import { serviceManager } from './service-manager';
+
+/**
+ * 异步迭代。有以下特点：
+ * 1. 每次调用 `nextIteration()` 会执行一次传入的**迭代函数**；迭代函数允许是异步的，在构造函数中确定之后不能更改；
+ * 2. 同时**最多仅会有一例**迭代在执行；
+ * 3. **迭代是可合并的**，也就是说，在前面的迭代没完成之前，后面的所有迭代都会被合并成一个。
+ */
+class AsyncIterationConcurrency1 {
+    private _iterate: () => Promise<void>;
+
+    private _executionPromise: Promise<void> | null = null;
+
+    private _pendingPromise: Promise<void> | null = null;
+
+    constructor(iterate: () => Promise<void>) {
+        this._iterate = iterate;
+    }
+
+    public nextIteration(): Promise<any> {
+        if (!this._executionPromise) {
+            // 如果未在执行，那就去执行
+            // assert(!this._pendingPromise)
+            return this._executionPromise = Promise.resolve(this._iterate()).finally(() => {
+                this._executionPromise = null;
+            });
+        } else if (!this._pendingPromise) {
+            // 如果没有等待队列，创建等待 promise，在 执行 promise 完成后执行
+            return this._pendingPromise = this._executionPromise.finally(() => {
+                this._pendingPromise = null;
+                // 等待 promise 将等待执行 promise，并在完成后重新入队
+                return this.nextIteration();
+            });
+        } else {
+            // 如果已经有等待队列，那就等待现有的队列
+            return this._pendingPromise;
+        }
+    }
+}
+
+/**
+ * 导入时异常的消息的标签。
+ */
+const importExceptionLogTag = '::SceneExecutorImportExceptionHandler::';
+
+import { GlobalEnv } from '../../common/global-env';
+
+const globalEnv = new GlobalEnv();
+
+@register('Script')
+export class ScriptService extends BaseService<IScriptEvents> implements IScriptService {
+    private _executor!: Executor;
+
+    private _isInited: boolean = false;
+
+    private _suspendPromise: Promise<void> | null = null;
+
+    private _syncPluginScripts: AsyncIterationConcurrency1;
+    private _reloadScripts: AsyncIterationConcurrency1;
+
+    /**
+     * 非引擎定义的组件
+     * @private
+     */
+    private customComponents: Set<Function> = new Set();
+
+    constructor() {
+        super();
+        this._reloadScripts = new AsyncIterationConcurrency1(() => this._execute());
+        this._syncPluginScripts = new AsyncIterationConcurrency1(() => this._syncPluginScriptList());
+    }
+
+    /**
+     * 挂起脚本管理器直到 `condition` 结束，才会进行下一次执行。
+     * @param condition
+     */
+    public suspend(condition: Promise<void>) {
+        this._suspendPromise = condition;
+    }
+
+    async init() {
+        if (this._isInited) return;
+        this._isInited = true;
+        EditorExtends.on('class-registered', (classConstructor: Function, metadata: any, className: string) => {
+            console.log('classRegistered', className);
+            console.log('class-registered ' + cc.js.isChildClassOf(classConstructor, cc.Component));
+            if (metadata && // Only project scripts
+                cc.js.isChildClassOf(classConstructor, cc.Component) // Only components
+            ) {
+                this.customComponents.add(classConstructor);
+                EditorExtends.Component.addMenu(
+                    classConstructor, `${i18n.transI18nName('i18n:ENGINE.menu.custom_script')}/${className}`, -1);
+            }
+        });
+        const serializedPackLoaderContext = await Rpc.getInstance().request('programming', 'getPackerDriverLoaderContext', ['editor']);
+        if (!serializedPackLoaderContext) {
+            throw new Error('packer-driver/get-loader-context is not defined');
+        }
+        const quickPackLoaderContext = QuickPackLoaderContext.deserialize(serializedPackLoaderContext);
+
+        const cceModuleMap = await Rpc.getInstance().request('programming', 'queryCCEModuleMap');
+        const isWebEnv = typeof (globalThis as any).EditorExtends !== 'undefined' && typeof System !== 'undefined' && typeof System.import === 'function' && !(process as any)?.versions?.node;
+        let loadDynamic: any;
+        if (!isWebEnv) {
+            const preload = await import('cc/preload');
+            loadDynamic = preload.loadDynamic;
+        }
+        this._executor = await Executor.create({
+            // @ts-ignore
+            importEngineMod: async (id) => {
+                if (isWebEnv) {
+                    return await System.import(id) as Record<string, unknown>;
+                }
+                return await loadDynamic!(id) as Record<string, unknown>;
+            },
+            quickPackLoaderContext,
+            beforeUnregisterClass: (classConstructor) => {
+                this.customComponents.delete(classConstructor);
+                EditorExtends.Component.removeMenu(classConstructor);
+            },
+            logger: {
+                loadException: (moduleId, error, hasBeenThrown?: boolean) => {
+                    // console.error(`An exception is thrown during load of module "${moduleId}" (or its recursive dependencies). `, error);
+                },
+                possibleCircularReference: (imported: string, moduleRequest: string, importMeta: any, extras: any) => {
+                    const moduleUrlToAssetLink = (url: string) => {
+                        const prefix = 'project:///';
+                        return url.startsWith(prefix) ? `{asset(db://${url.slice(prefix.length).replace('.js', '.ts')})}` : url;
+                    };
+                    console.warn(`在 ${moduleUrlToAssetLink(importMeta.url)} 中检测到可能的循环引用：从 ${moduleRequest} 导入 ${imported} 时。`,
+                        extras?.error?.stack,
+                    );
+                },
+            },
+            importExceptionHandler: (...args) => this._handleImportException(...args),
+            cceModuleMap,
+        });
+
+        globalThis.self = window;
+        if (!isWebEnv && typeof require !== 'undefined' && require.resolve) {
+            this._executor.addPolyfillFile(require.resolve('@cocos/build-polyfills/prebuilt/editor/bundle'));
+        }
+        // 同步插件脚本列表
+        await this._syncPluginScripts.nextIteration();
+        // 重载项目与插件脚本
+        await this._reloadScripts.nextIteration();
+    }
+
+    async investigatePackerDriver() {
+        await this._reloadScripts.nextIteration();
+    }
+
+    /**
+     * 传入一个 uuid 返回这个 uuid 对应的脚本组件名字
+     * @param uuid
+     */
+    async queryScriptName(uuid: string) {
+        const compressUuid = utils.UUID.compressUUID(uuid, false);
+        const list = this._executor.queryClassesInModule(compressUuid);
+        if (!list) {
+            return null;
+        }
+        const classConstructor = list.find((classConstructor) => cc.js.isChildClassOf(classConstructor as Function, cc.Component));
+        return classConstructor ? cc.js.getClassName(classConstructor) : null;
+    }
+
+    /**
+     * 传入一个 uuid 返回这个 uuid 对应的脚本的 cid
+     * @param uuid
+     */
+    async queryScriptCid(uuid: string) {
+        const compressUuid = utils.UUID.compressUUID(uuid, false);
+        const list = this._executor.queryClassesInModule(compressUuid);
+        if (!list) {
+            return null;
+        }
+        const classConstructor = list.find((classConstructor) => cc.js.isChildClassOf(classConstructor as Function, cc.Component));
+        return classConstructor ? cc.js.getClassId(classConstructor) : null;
+    }
+
+    /**
+     * 是否是自定义脚本（不是引擎定义的组件）
+     * @param classConstructor
+     */
+    public isCustomComponent(classConstructor: Function) {
+        return this.customComponents.has(classConstructor);
+    }
+
+    async _loadScripts() { }
+
+    /**
+     * 加载脚本时触发
+     */
+    async loadScript() {
+        this._syncPluginScriptListAsync();
+    }
+
+    /**
+     * 删除脚本时触发
+     */
+    async removeScript() {
+        this._syncPluginScriptListAsync();
+    }
+
+    /**
+     * 脚本发生变化时触发
+     */
+    async scriptChange() {
+        this._syncPluginScriptListAsync();
+    }
+
+    private _executeAsync() {
+
+        void this._reloadScripts.nextIteration();
+    }
+
+    private async _execute(): Promise<void> {
+        return Promise.resolve(this._suspendPromise ?? undefined).catch((reason) => {
+            console.error(reason);
+        }).finally(() => {
+            this._suspendPromise = null;
+
+            return globalEnv.record(
+                async () => {
+                    // Refresh pack import map before reload: after server-side recompilation,
+                    // chunk hashes change and the browser's cached import map becomes stale.
+                    const serverURL = serviceManager.getServerUrl();
+                    if (serverURL) {
+                        try {
+                            const res = await fetch(`${serverURL}/scripting/x/pack-import-map-url`);
+                            if (res.ok) {
+                                const map = await res.json();
+                                const script = document.createElement('script');
+                                script.type = 'systemjs-importmap';
+                                script.textContent = JSON.stringify(map);
+                                document.head.appendChild(script);
+                                // Force SystemJS to re-process all import maps
+                                if ((System as any).prepareImport) {
+                                    await (System as any).prepareImport(true);
+                                }
+                            }
+                        } catch {}
+                    }
+                    await this._executor.reload();
+                },
+            ).catch((err) => {
+                console.warn('[ScriptService] Executor reload failed:', err);
+            }).finally(() => {
+                this.emit('script:execution-finished');
+            });
+        });
+    }
+
+    /**
+     * 防止插件脚本切换到项目脚本或者反之时，没有同步插件脚本列表
+     * 这里使用了 AsyncIterationConcurrency1 功能，为了防止被多次调用，进行了迭代合并
+     * @private
+     */
+    private _syncPluginScriptListAsync() {
+        void this._syncPluginScripts.nextIteration();
+    }
+
+    /**
+     * 同步插件脚本列表到 Executor
+     * @private
+     */
+    private async _syncPluginScriptList() {
+        return Promise.resolve(Rpc.getInstance().request('assetManager', 'querySortedPlugins', [{
+            loadPluginInEditor: true,
+        }]))
+            .then((pluginScripts) => {
+                this._executor.setPluginScripts(pluginScripts || []);
+            })
+            .catch((reason) => {
+                console.error(reason);
+            });
+    }
+
+    private _handleImportException(err: unknown) {
+        console.error(`{hidden(${importExceptionLogTag})}`, err);
+    }
+}

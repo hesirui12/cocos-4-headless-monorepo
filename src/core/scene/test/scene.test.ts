@@ -1,0 +1,41 @@
+import * as fse from 'fs-extra';
+import { SceneTestEnv } from './scene-test-env';
+
+function removeCache() {
+    if (fse.existsSync(SceneTestEnv.cacheDirectory)) {
+        fse.removeSync(SceneTestEnv.cacheDirectory);
+        fse.removeSync(SceneTestEnv.cacheDirectory + '.meta');
+        console.log('删除场景测试目录:', SceneTestEnv.cacheDirectory);
+    }
+}
+
+beforeAll(async () => {
+    removeCache();
+    fse.ensureDirSync(SceneTestEnv.cacheDirectory);
+    console.log('创建场景测试目录:', SceneTestEnv.cacheDirectory);
+    const TestUtils = await import('../../test/global-setup');
+    await TestUtils.globalSetup();
+    const { assetManager } = await import('../../assets');
+    await assetManager.refreshAsset(SceneTestEnv.cacheDirectory);
+    const { loadSceneI18n } = await import('../index');
+    await loadSceneI18n();
+});
+
+afterAll(async () => {
+    removeCache();
+});
+
+import './editor-proxy-scene.testcase';
+import './editor-proxy-prefab.testcase';
+import './editor-lifecycle-real.testcase';
+import './node-proxy.testcase';
+import './node-for-editor.testcase';
+import './node-hierarchy.testcase';
+import './component-proxy.testcase';
+import './component-for-editor.testcase';
+import './prefab-proxy.testcase';
+import './script-proxy.testcase';
+import './engine-proxy.testcase';
+import './undo-redo.testcase';
+import './animation-service.testcase';
+import './scene-exit.testcase';

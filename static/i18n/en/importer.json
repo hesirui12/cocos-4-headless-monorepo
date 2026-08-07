@@ -1,0 +1,114 @@
+{
+    "invalid_node_data": "Invalid node data: resource {asset({assetUuid})} {type} has value {value}, abnormal data removed",
+    "node": "Node",
+    "component": "Component",
+    "sharp_error": "Failed to start sharp. If the project path contains special characters, please remove them and try again.",
+    "gltf": {
+        "gltf_asset_group_mesh": "Mesh",
+        "gltf_asset_group_animation": "Animation",
+        "gltf_asset_group_node": "Node",
+        "gltf_asset_group_skin": "Skin",
+        "gltf_asset_group_sampler": "Texture Sampler",
+        "gltf_asset": "{group}[{index}] ({name})",
+        "gltf_asset_no_name": "{group}[{index}]",
+        "unsupported_alpha_mode": "Alpha mode {mode} in {material} is not supported",
+        "unsupported_texture_parameter": "Texture parameter {type} with value {value} in {sampler} used by {texture} is not supported",
+        "texture_parameter_min_filter": "Min Filter",
+        "texture_parameter_mag_filter": "Mag Filter",
+        "unsupported_channel_path": "Channel type {path} in channel[{channel}] of {animation} is not supported, this channel will be ignored",
+        "reference_skin_in_different_scene": "{node} and its referenced {skin} are not in the same scene",
+        "disallow_cubic_spline_channel_split": "Channel[{channel}] of {animation} uses cubic spline interpolation, animation splitting cannot be applied to this curve",
+        "failed_to_calculate_tangents_due_to_lack_of_normals": "Cannot calculate tangent information for submesh[{primitive}] in {mesh} because normal information is missing",
+        "failed_to_calculate_tangents_due_to_lack_of_uvs": "Cannot calculate tangent information for submesh[{primitive}] in {mesh} because UV texture coordinate information is missing",
+        "empty_morph": "Morph data exists in primitive {primitive} of mesh {mesh}, but the data is empty.",
+        "unsupported_extension": "Unsupported GLTF extension: {name}",
+        "failed_to_load_image": "Failed to load image {url}: {reason}",
+        "image_uri_should_be_file_url": "Image URL must be a file URL",
+        "failed_to_convert_tga": "Failed to convert TGA image."
+    },
+    "fbx": {
+        "failed_to_convert_fbx_file": "Failed to convert FBX file {path}",
+        "no_available_fbx_temp_dir": "Internal error: Unable to find a path containing only ASCII characters for the 'fbx-temp-dir' option. You can try making the project path contain only English characters to resolve this issue.",
+        "fbx2gltf_exists_with_non_zero_code": "FBX2glTF process exited with non-zero status {code}, meaning the process may not have terminated successfully. This is usually because FBX2glTF encountered an internal error while converting the source FBX file. If possible, please report this error to the Cocos team or FBX2glTF authors with the relevant FBX file. Process output: {output}",
+        "fbx_gltf_conv": {
+            "bad_cpu": "glTFConv does not support the current CPU architecture, please try installing rosetta. Enter `softwareupdate --install-rosetta` in the command line tool",
+            "missing_dll": "Missing dependency library. Your system may be missing necessary runtime, please try installing VC runtime: https://aka.ms/vs/16/release/vc_redist.x64.exe.",
+            "unsupported_inherit_type": "The following nodes specify unsupported inheritance type [{type}]: [{nodes}].",
+            "multi_material_layers": "Mesh [{mesh}] has multiple material layers.",
+            "skin_merge_error": "Bone [{node}] has different inverse bind matrices on different meshes."
+        }
+    },
+    "dragonbones_atlas": {
+        "texture_not_imported": "{texture} was not imported",
+        "texture_not_found": "Cannot find texture {texture} for {atlas}"
+    },
+    "script": {
+        "invalid_class_name": "File class name is invalid, will be automatically renamed after creation",
+        "find_class_name_from_file_name_failed": "Cannot get valid class name from file name {fileBasename}, automatically renamed to {className}",
+        "transform_failure": "Script {path} transformation failed: ${reason}"
+    },
+    "property_schema": {
+        "auto_atlas": {
+            "max_width": "Max Width",
+            "max_height": "Max Height",
+            "padding": "Padding",
+            "allow_rotation": "Allow Rotation",
+            "force_squared": "Force Squared",
+            "power_of_two": "Power Of Two",
+            "algorithm": "Algorithm",
+            "max_rects": "MaxRects",
+            "format": "Format",
+            "png": "PNG",
+            "jpg": "JPG",
+            "quality": "Quality",
+            "contour_bleed": "Contour Bleed",
+            "padding_bleed": "Padding Bleed",
+            "filter_unused": "Filter Unused",
+            "remove_texture_in_bundle": "Remove Texture In Bundle",
+            "remove_image_in_bundle": "Remove Image In Bundle",
+            "remove_sprite_atlas_in_bundle": "Remove SpriteAtlas In Bundle",
+            "texture_setting": "Texture Setting"
+        },
+        "texture": {
+            "use_uuid": "Use UUID",
+            "wrap_repeat": "Repeat",
+            "wrap_clamp_to_edge": "Clamp To Edge",
+            "wrap_mirrored_repeat": "Mirrored Repeat",
+            "filter_none": "None",
+            "filter_nearest": "Nearest",
+            "filter_linear": "Linear"
+        },
+        "image": {
+            "type_raw": "raw",
+            "type_texture": "texture",
+            "type_normal_map": "normal map",
+            "type_sprite_frame": "sprite-frame",
+            "type_texture_cube": "texture cube"
+        },
+        "sprite_frame": {
+            "trim_type_auto": "auto",
+            "trim_type_custom": "custom",
+            "trim_type_none": "none",
+            "mesh_type_rect": "Rect",
+            "mesh_type_polygon": "Polygon"
+        },
+        "gltf": {
+            "mesh_optimizer": "Mesh Optimizer",
+            "mesh_optimizer_enable": "Enable",
+            "mesh_optimizer_algorithm": "Algorithm",
+            "mesh_optimizer_simplify": "Simplify",
+            "mesh_optimizer_gltfpack": "gltfpack",
+            "simplify_options": "Simplify Options",
+            "enable_smart_link": "Enable Smart Link",
+            "agressiveness": "Aggressiveness",
+            "max_iteration_count": "Max Iteration Count"
+        },
+        "fbx": {
+            "unit_conversion": "Unit Conversion",
+            "unit_conversion_geometry_level": "Geometry Level",
+            "unit_conversion_hierarchy_level": "Hierarchy Level",
+            "unit_conversion_disabled": "Disabled",
+            "match_mesh_names": "Match Mesh Names"
+        }
+    }
+}

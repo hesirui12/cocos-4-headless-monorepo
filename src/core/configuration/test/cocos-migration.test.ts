@@ -1,0 +1,251 @@
+import { CocosMigrationManager, CocosMigration } from '../migration';
+import { getMigrationList } from '../migration/register-migration';
+import type { IMigrationTarget } from '../migration';
+
+jest.mock('../migration/cocos-migration', () => ({
+    CocosMigration: {
+        migrate: jest.fn()
+    }
+}));
+
+describe('CocosMigrationManager', () => {
+    const mockMigrate = CocosMigration.migrate as jest.MockedFunction<typeof CocosMigration.migrate>;
+
+    beforeEach(() => {
+        jest.clearAllMocks();
+        // 清空已注册的迁移器
+        CocosMigrationManager.clear();
+    });
+
+    describe('register', () => {
+        it('应支持注册单个迁移器，默认 targetScope 为 project', () => {
+            const t1: IMigrationTarget = {
+                sourceScope: 'project',
+                pluginName: 'pkgA',
+                migrate: async () => ({})
+            };
+
+            CocosMigrationManager.register(t1);
+
+            const map = CocosMigrationManager.migrationTargets;
+            expect(map.size).toBe(1);
+            expect(map.get('project')?.length).toBe(1);
+        });
+
+        it('应支持批量注册并按各自 scope 分类', () => {
+            const t1: IMigrationTarget = {
+                sourceScope: 'project',
+                pluginName: 'pkgA',
+                migrate: async () => ({ a: 1 })
+            };
+            const t2: IMigrationTarget = {
+                sourceScope: 'local',
+                targetScope: 'project',
+                pluginName: 'pkgB',
+                migrate: async () => ({ b: 2 })
+            };
+
+            CocosMigrationManager.register([t1, t2]);
+
+            const map = CocosMigrationManager.migrationTargets;
+            expect(map.get('project')?.[0]).toBe(t1);
+            expect(map.get('project')?.[1]).toBe(t2);
+        });
+
+        it('should register local source migrations to local scope by default', () => {
+            const target: IMigrationTarget = {
+                sourceScope: 'local',
+                pluginName: 'pkgLocal',
+                migrate: async () => ({ local: true })
+            };
+
+            CocosMigrationManager.register(target);
+
+            const map = CocosMigrationManager.migrationTargets;
+            expect(map.get('local')?.[0]).toBe(target);
+            expect(map.get('project')).toBeUndefined();
+        });
+    });
+
+    describe('migrate', () => {
+        it('无注册迁移器时直接抛异常', async () => {
+            // 清空迁移器并阻止自动注册
+            CocosMigrationManager.clear();
+            // Mock registerMigration 方法使其不注册任何迁移器
+            const originalRegisterMigration = CocosMigrationManager['registerMigration'];
+            CocosMigrationManager['registerMigration'] = jest.fn().mockResolvedValue(undefined);
+
+            try {
+                await expect(CocosMigrationManager.migrate('/path')).rejects.toThrow('[Migration] 没有注册任何迁移器');
+            } finally {
+                // 恢复原始方法
+                CocosMigrationManager['registerMigration'] = originalRegisterMigration;
+            }
+        });
+
+        it('应按 scope 执行迁移并深度合并结果', async () => {
+            const t1: IMigrationTarget = {
+                sourceScope: 'project',
+                pluginName: 'pkgA',
+                migrate: async () => ({})
+            };
+            const t2: IMigrationTarget = {
+                sourceScope: 'project',
+                pluginName: 'pkgB',
+                migrate: async () => ({})
+            };
+            const t3: IMigrationTarget = {
+                sourceScope: 'local',
+                pluginName: 'pkgC',
+                migrate: async () => ({})
+            };
+
+            // Mock registerMigration to prevent clearing our custom migrations
+            const originalRegisterMigration = CocosMigrationManager['registerMigration'];
+            CocosMigrationManager['registerMigration'] = jest.fn().mockResolvedValue(undefined);
+
+            try {
+                CocosMigrationManager.register([t1, t2, t3]);
+
+                mockMigrate
+                    .mockResolvedValueOnce({ a: { x: 1 }, p: 1 }) // t1
+                    .mockResolvedValueOnce({ a: { y: 2 }, p: 2 }) // t2
+                    .mockResolvedValueOnce({ g: { k: 3 } }); // t3
+
+                const res = await CocosMigrationManager.migrate('/proj');
+
+                expect(mockMigrate).toHaveBeenCalledTimes(3);
+                expect(res).toEqual({
+                    project: { a: { x: 1, y: 2 }, p: 2 },
+                    local: { g: { k: 3 } },
+                });
+            } finally {
+                // Restore original method
+                CocosMigrationManager['registerMigration'] = originalRegisterMigration;
+            }
+        });
+
+        it('单个迁移器失败直接抛异常', async () => {
+            const t1: IMigrationTarget = {
+                sourceScope: 'project',
+                pluginName: 'ok',
+                migrate: async () => ({})
+            };
+            const t2: IMigrationTarget = {
+                sourceScope: 'project',
+                pluginName: 'bad',
+                migrate: async () => ({})
+            };
+            CocosMigrationManager.register([t1, t2]);
+
+            mockMigrate
+                .mockResolvedValueOnce({ v: 1 })
+                .mockRejectedValueOnce(new Error('单个迁移器失败直接抛异常'));
+            await expect(CocosMigrationManager.migrate('/proj')).rejects.toThrow('[Migration] 迁移失败, 详情请查看日志');
+        });
+    });
+
+    describe('built-in migration targets', () => {
+        it('should migrate engine.modules.graphics into engine.graphics', async () => {
+            const migration = getMigrationList().find((target) => {
+                return target.pluginName === 'engine' && target.targetPath === 'engine';
+            });
+            const oldConfig = {
+                macroConfig: {
+                    CUSTOM_PIPELINE_NAME: 'Forward',
+                },
+                modules: {
+                    globalConfigKey: 'default',
+                    configs: {
+                        default: {
+                            includeModules: ['custom-pipeline'],
+                            flags: {},
+                            cache: {
+                                'custom-pipeline': {
+                                    _option: 'custom-pipeline',
+                                },
+                            },
+                        },
+                    },
+                    graphics: {
+                        pipeline: 'legacy-pipeline',
+                        'custom-pipeline-post-process': true,
+                    },
+                },
+            };
+
+            expect(migration).toBeDefined();
+
+            const result = await migration!.migrate(oldConfig);
+
+            expect(result).toEqual({
+                macroConfig: {
+                    CUSTOM_PIPELINE_NAME: 'Forward',
+                },
+                configs: {
+                    default: {
+                        includeModules: ['custom-pipeline'],
+                        flags: {},
+                    },
+                },
+                globalConfigKey: 'default',
+                graphics: {
+                    pipeline: 'legacy-pipeline',
+                    'custom-pipeline-post-process': true,
+                },
+            });
+        });
+
+        it('should migrate top-level graphics without requiring general settings', async () => {
+            const migration = getMigrationList().find((target) => {
+                return target.pluginName === 'project' && !target.targetPath;
+            });
+            const oldConfig = {
+                macroConfig: {
+                    CUSTOM_PIPELINE_NAME: 'Forward',
+                },
+                graphics: {
+                    pipeline: 'custom-pipeline',
+                    'custom-pipeline-post-process': true,
+                },
+            };
+
+            expect(migration).toBeDefined();
+
+            const result = await migration!.migrate(oldConfig);
+
+            expect(result).toEqual({
+                engine: {
+                    macroConfig: {
+                        CUSTOM_PIPELINE_NAME: 'Forward',
+                    },
+                    graphics: {
+                        pipeline: 'custom-pipeline',
+                        'custom-pipeline-post-process': true,
+                    },
+                },
+            });
+        });
+    });
+});
+
+describe('registered cocos migrations', () => {
+    it('应从 Creator project script 配置迁移 sortingPlugin 到新 script 域', async () => {
+        const projectMigration = getMigrationList().find((target) => (
+            target.sourceScope === 'project'
+            && target.pluginName === 'project'
+            && !target.targetPath
+        ));
+
+        expect(projectMigration).toBeDefined();
+
+        const result = await projectMigration!.migrate({
+            script: {
+                exportsConditions: ['browser'],
+                sortingPlugin: ['plugin-uuid-a', 'plugin-uuid-b'],
+            },
+        });
+
+        expect(result.script.sortingPlugin).toEqual(['plugin-uuid-a', 'plugin-uuid-b']);
+    });
+});

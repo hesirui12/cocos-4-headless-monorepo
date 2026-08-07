@@ -1,0 +1,20 @@
+# E2E 测试生成的临时文件
+*.log
+coverage/
+
+# 测试工作区（统一的测试项目目录）
+.workspace/
+
+# Jest 缓存
+.jest/
+
+# 测试报告
+server/reports/
+
+# 测试日志
+server/logs/
+
+server/.publish
+
+# auto generated files
+types/mcp-tools.generated.ts

@@ -1,0 +1,80 @@
+name: 'Check E2E Coverage'
+description: '检查 E2E 测试覆盖率并生成报告'
+
+inputs:
+  report-server-url:
+    description: '报告服务器地址'
+    required: true
+    default: 'http://192.168.52.77:8080'
+
+outputs:
+  report_path:
+    description: '覆盖率报告文件路径'
+    value: ${{ steps.coverage-report.outputs.report_path }}
+  report_url:
+    description: '覆盖率报告 URL'
+    value: ${{ steps.report-url.outputs.report_url }}
+  report_filename:
+    description: '覆盖率报告文件名'
+    value: ${{ steps.report-url.outputs.report_filename }}
+  coverage_percent:
+    description: '覆盖率百分比'
+    value: ${{ steps.coverage-report.outputs.coverage_percent }}
+  tested_count:
+    description: '已测试的 API 数量'
+    value: ${{ steps.coverage-report.outputs.tested_count }}
+  total_count:
+    description: 'API 总数'
+    value: ${{ steps.coverage-report.outputs.total_count }}
+  markdown:
+    description: 'Markdown 格式的覆盖率摘要'
+    value: ${{ steps.coverage-report.outputs.markdown }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate coverage report with Markdown
+      id: coverage-report
+      shell: bash
+      # 覆盖率检查仅作为信息展示，不会导致流程失败
+      # 添加重试逻辑以应对 Windows CI 上概率性出现的 exit code 127（tsx 命令解析失败）
+      run: |
+        max_retries=3
+        attempt=0
+        while [ $attempt -lt $max_retries ]; do
+          attempt=$((attempt + 1))
+          echo "🔄 Attempt $attempt of $max_retries..."
+          set +e
+          npm run check:e2e-coverage:report -- --markdown
+          exit_code=$?
+          set -e
+          if [ $exit_code -eq 0 ]; then
+            echo "✅ Coverage report generated successfully"
+            exit 0
+          fi
+          echo "⚠️ Attempt $attempt failed with exit code $exit_code"
+          if [ $attempt -lt $max_retries ]; then
+            echo "⏳ Retrying in 3 seconds..."
+            sleep 3
+          fi
+        done
+        echo "❌ All $max_retries attempts failed"
+        exit 1
+    
+    - name: Generate coverage report URL
+      id: report-url
+      shell: bash
+      # 只要有报告就生成 URL
+      if: steps.coverage-report.outputs.report_path != ''
+      run: |
+        REPORT_FILE="${{ steps.coverage-report.outputs.report_path }}"
+        REPORT_FILENAME=$(basename "$REPORT_FILE")
+        
+        # 生成报告 URL（CI 机器上的 http-server 已在运行）
+        REPORT_URL="${{ inputs.report-server-url }}/reports/$REPORT_FILENAME"
+        echo "report_url=$REPORT_URL" >> $GITHUB_OUTPUT
+        echo "report_filename=$REPORT_FILENAME" >> $GITHUB_OUTPUT
+        
+        echo "📊 Coverage Report URL: $REPORT_URL"
+        echo "📄 Report file: $REPORT_FILE"
+

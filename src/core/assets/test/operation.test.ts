@@ -1,0 +1,1031 @@
+'use strict';
+import { join } from 'path';
+import { existsSync, statSync, readJSONSync, writeJSONSync, readFileSync, remove, outputFile, ensureDir } from 'fs-extra';
+import { globalSetup } from '../../test/global-setup';
+import { TestGlobalEnv } from '../../../tests/global-env';
+import { assetManager } from '..';
+import { ISupportCreateType } from '../@types/asset-types';
+import { IAsset } from '../@types/private';
+
+describe('测试 db 的操作接口', function () {
+    const name = `__${Date.now()}__`;
+    const testName = 'test-asset.txt';
+    const databasePath = TestGlobalEnv.testRoot;
+    type AssetEventName = 'asset-add' | 'asset-change' | 'asset-delete';
+
+    function waitForAssetEventPropagation() {
+        return new Promise((resolve) => setTimeout(resolve, 30));
+    }
+
+    async function expectSingleAssetEvent(eventName: AssetEventName, expectedUrl: string, action: () => Promise<void>) {
+        const payloads: IAsset[] = [];
+        const handler = (asset: IAsset) => {
+            if (asset.url === expectedUrl) {
+                payloads.push(asset);
+            }
+        };
+
+        assetManager.on(eventName, handler);
+        try {
+            await action();
+            await waitForAssetEventPropagation();
+        } finally {
+            assetManager.removeListener(eventName, handler);
+        }
+        expect(payloads).toHaveLength(1);
+        return payloads[0]!;
+    }
+
+    beforeAll(async () => {
+        // 创建一些资源供测试
+        await globalSetup();
+    });
+    beforeEach(async () => {
+        await assetManager.createAsset({
+            target: join(databasePath, testName),
+            content: 'test',
+            overwrite: true,
+        });
+    });
+
+    describe('create-asset', function () {
+        it('创建文件夹', async function () {
+            const asset = await assetManager.createAsset({
+                target: join(databasePath, `${name}.directory`),
+            });
+            expect(asset).not.toBeNull();
+            const exists = existsSync(join(databasePath, `${name}.directory`));
+            console.log(join(databasePath, `${name}.directory`));
+            expect(exists).toBeTruthy();
+
+            const stat = statSync(join(databasePath, `${name}.directory`));
+            expect(stat.isDirectory()).toBeTruthy();
+
+            const meta = readJSONSync(join(databasePath, `${name}.directory.meta`));
+            expect(meta.uuid).toEqual(asset!.uuid);
+        });
+
+        it('创建普通的文本文件', async function () {
+            const asset = await assetManager.createAsset({
+                target: join(databasePath, `${name}-create-asset-normal.txt`),
+                content: 'test',
+            });
+            expect(asset).not.toBeNull();
+        });
+
+        it('创建普通的文本文件 overwrite', async function () {
+            const dest = join(databasePath, `${name}-create-asset-overwrite.txt`);
+            await outputFile(dest, 'original content');
+            const asset = await assetManager.createAsset({
+                target: dest,
+                content: 'createAssetOverwrite',
+                overwrite: true,
+            });
+            expect(asset).not.toBeNull();
+            expect(readFileSync(dest, 'utf8')).toEqual('createAssetOverwrite');
+        });
+
+        it('createAssetByType 传 rename 时，遇到重名会自动生成新文件名', async function () {
+            const baseName = `${name}-create-asset-by-type-rename`;
+            const dest = join(databasePath, baseName);
+            await ensureDir(dest);
+
+            const asset = await assetManager.createAssetByType('directory', databasePath, baseName, {
+                rename: true,
+            });
+
+            expect(asset).not.toBeNull();
+            expect(existsSync(dest)).toBeTruthy();
+            expect(statSync(dest).isDirectory()).toBeTruthy();
+            expect(asset!.file).not.toEqual(dest);
+            expect(existsSync(asset!.file)).toBeTruthy();
+            expect(statSync(asset!.file).isDirectory()).toBeTruthy();
+        });
+
+        it('创建资源会广播 asset-add 消息', async function () {
+            const targetName = `${name}-event-add.txt`;
+            const targetPath = join(databasePath, targetName);
+            const targetUrl = `${TestGlobalEnv.testRootUrl}/${targetName}`;
+            let createdAssetUuid: string | undefined;
+
+            const eventAsset = await expectSingleAssetEvent('asset-add', targetUrl, async () => {
+                const createdAsset = await assetManager.createAsset({
+                    target: targetPath,
+                    content: 'asset add event',
+                    overwrite: true,
+                });
+                createdAssetUuid = createdAsset?.uuid;
+            });
+
+            expect(createdAssetUuid).toBeDefined();
+            expect(eventAsset.uuid).toEqual(createdAssetUuid);
+            expect(eventAsset.url).toEqual(targetUrl);
+        });
+    });
+
+    describe('copy-asset', () => {
+        it('copies a texture cube image without falling back to sprite-frame', async function () {
+            const sourceUrl = 'db://internal/default_skybox/default_skybox.png';
+            const targetName = `${name}-copy-texture-cube.png`;
+            const targetUrl = `${TestGlobalEnv.testRootUrl}/${targetName}`;
+            const targetPath = join(databasePath, targetName);
+            const sourceMeta = readJSONSync(join(TestGlobalEnv.engineRoot, 'editor/assets/default_skybox/default_skybox.png.meta'));
+
+            const copiedAsset = await assetManager.copyAsset(sourceUrl, targetUrl);
+            const targetMeta = readJSONSync(`${targetPath}.meta`);
+            const cubeId = 'b47c0';
+
+            expect(copiedAsset.url).toBe(targetUrl);
+            expect(targetMeta.userData.type).toBe('texture cube');
+            expect(targetMeta.uuid).not.toBe(sourceMeta.uuid);
+            expect(targetMeta.subMetas[cubeId].uuid).toBe(`${targetMeta.uuid}@${cubeId}`);
+            expect(targetMeta.subMetas[cubeId].userData.imageDatabaseUri).toBe(targetMeta.uuid);
+            for (const faceId of Object.keys(sourceMeta.subMetas[cubeId].subMetas)) {
+                expect(targetMeta.subMetas[cubeId].subMetas[faceId].uuid).toBe(`${targetMeta.uuid}@${cubeId}@${faceId}`);
+            }
+        });
+
+        it('copies a sprite-frame image with new UUIDs and preserved metadata', async function () {
+            const sourceUrl = 'db://assets/default_btn_normal.png';
+            const targetName = `${name}-copy-sprite-frame.png`;
+            const targetUrl = `${TestGlobalEnv.testRootUrl}/${targetName}`;
+            const targetPath = join(databasePath, targetName);
+            const sourceMeta = readJSONSync(join(TestGlobalEnv.projectRoot, 'assets/default_btn_normal.png.meta'));
+
+            const copiedAsset = await assetManager.copyAsset(sourceUrl, targetUrl);
+            const targetMeta = readJSONSync(`${targetPath}.meta`);
+
+            expect(copiedAsset.url).toBe(targetUrl);
+            expect(targetMeta.userData.type).toBe('sprite-frame');
+            expect(targetMeta.uuid).not.toBe(sourceMeta.uuid);
+            expect(targetMeta.subMetas['6c48a'].uuid).toBe(`${targetMeta.uuid}@6c48a`);
+            expect(targetMeta.subMetas['f9941'].uuid).toBe(`${targetMeta.uuid}@f9941`);
+            expect(targetMeta.subMetas['f9941'].userData.imageUuidOrDatabaseUri).toBe(`${targetMeta.uuid}@6c48a`);
+            expect(targetMeta.userData.redirect).toBe(`${targetMeta.uuid}@6c48a`);
+        });
+    });
+
+    // describe('copy-asset', () => {
+    //     it('复制文件夹', async function() {
+    //         await assetManager.copyAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${name}.directory`,
+    //             `${TestGlobalEnv.testRootUrl}/${name}.directory2`,
+    //         );
+
+    //         const uuid = await assetManager.queryUUID(`${TestGlobalEnv.testRootUrl}/${name}.directory2`);
+
+    //         const exists = existsSync(join(databasePath, `${name}.directory`));
+    //         expect(exists).toStrictEqual(true);
+
+    //         const exists2 = existsSync(join(databasePath, `${name}.directory2`));
+    //         expect(exists2).toStrictEqual(true);
+
+    //         const stat = statSync(join(databasePath, `${name}.directory2`));
+    //         expect(stat.isDirectory()).toStrictEqual(true);
+
+    //         const meta = readJSONSync(join(databasePath, `${name}.directory2.meta`));
+    //         expect(meta.uuid).toStrictEqual(uuid);
+    //     });
+
+    //     it('复制普通资源', async function() {
+    //         await assetManager.copyAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${name}.normal`,
+    //             `${TestGlobalEnv.testRootUrl}/${name}.normal2`,
+    //         );
+
+    //         const uuid = await assetManager.queryUUID(`${TestGlobalEnv.testRootUrl}/${name}.normal2`);
+
+    //         const exists = existsSync(join(databasePath, `${name}.normal`));
+    //         expect(exists).toStrictEqual(true);
+
+    //         const exists2 = existsSync(join(databasePath, `${name}.normal2`));
+    //         expect(exists2).toStrictEqual(true);
+
+    //         const stat = statSync(join(databasePath, `${name}.normal2`));
+    //         expect(stat.isDirectory()).toStrictEqual(false);
+
+    //         const meta = readJSONSync(join(databasePath, `${name}.normal2.meta`));
+    //         expect(meta.uuid).toStrictEqual(uuid);
+
+    //         const content = readFileSync(join(databasePath, `${name}.normal2`), 'utf8');
+    //         expect(content).toStrictEqual('test');
+    //     });
+    // });
+
+    // describe('move-asset', () => {
+    //     it('移动文件夹', async function() {
+    //         await assetManager.moveAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${name}.directory2`,
+    //             `${TestGlobalEnv.testRootUrl}/${name}.directory3`,
+    //         );
+
+    //         const exists = existsSync(join(databasePath, `${name}.directory2`));
+    //         expect(exists).toStrictEqual(false);
+
+    //         const exists2 = existsSync(join(databasePath, `${name}.directory3`));
+    //         expect(exists2).toStrictEqual(true);
+
+    //         const stat = statSync(join(databasePath, `${name}.directory3`));
+    //         expect(stat.isDirectory()).toStrictEqual(true);
+
+    //         // move 传出的是一个 bool，不是预期的 uuid
+    //         // const meta = readJSONSync(join(databasePath, `${name}.directory3.meta`));
+    //         // expect(meta.uuid).toStrictEqual(uuid);
+    //     });
+
+    //     it('移动普通资源', async function() {
+    //         await assetManager.moveAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${name}.normal2`,
+    //             `${TestGlobalEnv.testRootUrl}/${name}.normal3`,
+    //         );
+
+    //         const exists = existsSync(join(databasePath, `${name}.normal2`));
+    //         expect(exists).toStrictEqual(false);
+
+    //         const exists2 = existsSync(join(databasePath, `${name}.normal3`));
+    //         expect(exists2).toStrictEqual(true);
+
+    //         const stat = statSync(join(databasePath, `${name}.normal3`));
+    //         expect(stat.isDirectory()).toStrictEqual(false);
+
+    //         // move 传出的是一个 bool，不是预期的 uuid
+    //         // const meta = readJSONSync(join(databasePath, `${name}.normal3.meta`));
+    //         // expect(meta.uuid).toStrictEqual(uuid);
+
+    //         const content = readFileSync(join(databasePath, `${name}.normal3`), 'utf8');
+    //         expect(content).toStrictEqual('test');
+    //     });
+
+    //     it('普通的移动重命名资源', async function() {
+    //         const testName1 = name;
+    //         const testName2 = name + 'A';
+    //         await assetManager.moveAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${testName1}.normal3`,
+    //             `${TestGlobalEnv.testRootUrl}/${testName2}.normal3`,
+    //         );
+
+    //         const exists = existsSync(join(databasePath, `${testName1}.normal3`));
+    //         expect(exists).toStrictEqual(false);
+
+    //         const exists2 = existsSync(join(databasePath, `${testName2}.normal3`));
+    //         expect(exists2).toStrictEqual(true);
+
+    //         const content = readFileSync(join(databasePath, `${testName2}.normal3`), 'utf8');
+    //         expect(content).toStrictEqual('test');
+    //     });
+
+    //     it('大小写差异的重命名资源', async function() {
+    //         const testName1 = name + 'A';
+    //         const testName2 = name + 'a';
+    //         await assetManager.moveAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${testName1}.normal3`,
+    //             `${TestGlobalEnv.testRootUrl}/${testName2}.normal3`,
+    //         );
+
+    //         const testName1Uuid = await assetManager.queryUUID(join(databasePath, `${testName1}.normal3`));
+    //         expect(!!testName1Uuid).toStrictEqual(false);
+
+    //         const testName2Uuid = await assetManager.queryUUID(join(databasePath, `${testName2}.normal3`));
+    //         expect(!!testName2Uuid).toStrictEqual(true);
+
+    //         const metaExist = existsSync(join(databasePath, `${testName2}.normal3.meta`));
+    //         expect(metaExist).toStrictEqual(true);
+
+    //         const content = readFileSync(join(databasePath, `${testName2}.normal3`), 'utf8');
+    //         expect(content).toStrictEqual('test');
+    //     });
+    // });
+
+    describe('rename-asset', () => {
+        it('使用 url 重命名普通资源时，第二个参数只接收 newName', async function () {
+            const sourceName = `${name}_rename-file.txt`;
+            const targetName = `${name}_rename-file-next.txt`;
+            const sourcePath = join(databasePath, sourceName);
+            const targetPath = join(databasePath, targetName);
+
+            await assetManager.createAsset({
+                target: sourcePath,
+                content: 'rename-file',
+                overwrite: true,
+            });
+
+            await assetManager.renameAsset(`${TestGlobalEnv.testRootUrl}/${sourceName}`, targetName);
+
+            expect(existsSync(sourcePath)).toStrictEqual(false);
+            expect(existsSync(`${sourcePath}.meta`)).toStrictEqual(false);
+            expect(existsSync(targetPath)).toStrictEqual(true);
+            expect(existsSync(`${targetPath}.meta`)).toStrictEqual(true);
+            expect(readFileSync(targetPath, 'utf8')).toStrictEqual('rename-file');
+        });
+
+        it('使用 uuid 重命名文件夹时，newName 保持在原目录下', async function () {
+            const sourceName = `${name}_rename-folder`;
+            const targetName = `${name}_rename-folder-next`;
+            const sourcePath = join(databasePath, sourceName);
+            const targetPath = join(databasePath, targetName);
+
+            const asset = await assetManager.createAsset({
+                target: sourcePath,
+            });
+
+            await assetManager.renameAsset(asset!.uuid, targetName);
+
+            expect(existsSync(sourcePath)).toStrictEqual(false);
+            expect(existsSync(`${sourcePath}.meta`)).toStrictEqual(false);
+            expect(existsSync(targetPath)).toStrictEqual(true);
+            expect(existsSync(`${targetPath}.meta`)).toStrictEqual(true);
+            expect(statSync(targetPath).isDirectory()).toStrictEqual(true);
+        });
+
+        it('使用绝对路径重命名时，rename 选项会在名称冲突后自动生成新名称', async function () {
+            const sourceName = `${name}_rename-conflict-source.txt`;
+            const targetName = `${name}_rename-conflict-target.txt`;
+            const autoRenamedName = `${name}_rename-conflict-target-001.txt`;
+            const sourcePath = join(databasePath, sourceName);
+            const targetPath = join(databasePath, targetName);
+            const autoRenamedPath = join(databasePath, autoRenamedName);
+
+            await assetManager.createAsset({
+                target: sourcePath,
+                content: 'source-content',
+                overwrite: true,
+            });
+            await assetManager.createAsset({
+                target: targetPath,
+                content: 'target-content',
+                overwrite: true,
+            });
+
+            await assetManager.renameAsset(sourcePath, targetName, {
+                rename: true,
+            });
+
+            expect(existsSync(sourcePath)).toStrictEqual(false);
+            expect(existsSync(targetPath)).toStrictEqual(true);
+            expect(readFileSync(targetPath, 'utf8')).toStrictEqual('target-content');
+            expect(existsSync(autoRenamedPath)).toStrictEqual(true);
+            expect(readFileSync(autoRenamedPath, 'utf8')).toStrictEqual('source-content');
+        });
+
+        it('重命名文件时 newName 必须带后缀名', async function () {
+            const sourceName = `${name}_rename-no-ext.txt`;
+            const sourcePath = join(databasePath, sourceName);
+
+            await assetManager.createAsset({
+                target: sourcePath,
+                content: 'rename-no-ext',
+                overwrite: true,
+            });
+
+            await expect(assetManager.renameAsset(sourcePath, `${name}_rename-no-ext-next`)).rejects.toThrow(
+                'newName must include file extension'
+            );
+
+            expect(existsSync(sourcePath)).toStrictEqual(true);
+            expect(readFileSync(sourcePath, 'utf8')).toStrictEqual('rename-no-ext');
+        });
+
+        it('newName 包含路径分隔符时应该失败', async function () {
+            const sourceName = `${name}_rename-invalid.txt`;
+            const sourcePath = join(databasePath, sourceName);
+
+            await assetManager.createAsset({
+                target: sourcePath,
+                content: 'rename-invalid',
+                overwrite: true,
+            });
+
+            await expect(assetManager.renameAsset(sourcePath, `nested/${name}_rename-invalid-next.txt`)).rejects.toThrow(
+                'newName must be a single file or directory name'
+            );
+
+            expect(existsSync(sourcePath)).toStrictEqual(true);
+            expect(readFileSync(sourcePath, 'utf8')).toStrictEqual('rename-invalid');
+        });
+    });
+
+    describe('delete-asset', () => {
+        describe('删除文件夹', function () {
+
+            it('删除文件夹后源文件不存在', async () => {
+                await assetManager.removeAsset(`${TestGlobalEnv.testRootUrl}/${testName}`);
+                const exists = existsSync(join(databasePath, `${testName}`));
+                expect(exists).toStrictEqual(false);
+                const metaExists = existsSync(join(databasePath, `${testName}`));
+                console.log(Date.now());
+                expect(metaExists).toStrictEqual(false);
+            });
+        });
+
+        it('使用 url 删除普通资源', async function () {
+            await assetManager.removeAsset(`${TestGlobalEnv.testRootUrl}/${testName}`);
+
+            const exists = existsSync(join(databasePath, `${testName}`));
+            expect(exists).toStrictEqual(false);
+
+            const metaExists = existsSync(join(databasePath, `${testName}.meta`));
+            expect(metaExists).toStrictEqual(false);
+        });
+
+        it('使用 uuid 删除普通资源', async function () {
+            const testName = `${name}_delete.normal`;
+            const asset = await assetManager.createAsset({
+                target: join(databasePath, testName),
+                content: 'test',
+            });
+            await assetManager.removeAsset(asset!.uuid);
+
+            const exists = existsSync(join(databasePath, `${testName}`));
+            expect(exists).toStrictEqual(false);
+
+            const metaExists = existsSync(join(databasePath, `${testName}.meta`));
+            expect(metaExists).toStrictEqual(false);
+        });
+
+        it('删除资源会广播 asset-delete 消息', async function () {
+            const targetName = `${name}_event_delete.txt`;
+            const targetPath = join(databasePath, targetName);
+            const createdAsset = await assetManager.createAsset({
+                target: targetPath,
+                content: 'delete event',
+                overwrite: true,
+            });
+            const targetUrl = `${TestGlobalEnv.testRootUrl}/${targetName}`;
+
+            const eventAsset = await expectSingleAssetEvent('asset-delete', targetUrl, async () => {
+                await assetManager.removeAsset(targetUrl);
+            });
+
+            expect(createdAsset).not.toBeNull();
+            expect(eventAsset.uuid).toEqual(createdAsset!.uuid);
+            expect(eventAsset.url).toEqual(targetUrl);
+        });
+    });
+
+    describe('save-asset', () => {
+        it('保存普通资源', async function () {
+            await assetManager.saveAsset(`${TestGlobalEnv.testRootUrl}/${testName}`, 'test2');
+
+            const filePath = join(TestGlobalEnv.testRoot, testName);
+            expect(existsSync(filePath)).toStrictEqual(true);
+
+            const content = readFileSync(filePath, 'utf8');
+            expect(content).toStrictEqual('test2');
+        });
+        // 保存场景、prefab、材质、动画
+
+        it('保存资源会广播 asset-change 消息', async function () {
+            const targetName = `${name}-event-change.txt`;
+            const targetPath = join(databasePath, targetName);
+            const createdAsset = await assetManager.createAsset({
+                target: targetPath,
+                content: 'change event',
+                overwrite: true,
+            });
+            const targetUrl = `${TestGlobalEnv.testRootUrl}/${targetName}`;
+
+            const eventAsset = await expectSingleAssetEvent('asset-change', targetUrl, async () => {
+                await assetManager.saveAsset(targetUrl, 'change event updated');
+            });
+
+            expect(createdAsset).not.toBeNull();
+            expect(eventAsset.uuid).toEqual(createdAsset!.uuid);
+            expect(eventAsset.url).toEqual(targetUrl);
+        });
+    });
+
+    describe('reimport-asset', () => {
+        it('普通资源 uuid 的 reimport', async () => {
+            const uuid = await assetManager.queryUUID(`${TestGlobalEnv.testRootUrl}/${testName}`);
+
+            const metaJson = readJSONSync(join(TestGlobalEnv.testRoot, `${testName}.meta`));
+            metaJson.userData.testReimport = true;
+            writeJSONSync(join(databasePath, `${testName}.meta`), metaJson);
+
+            await assetManager.reimportAsset(uuid!);
+            const assetMeta = await assetManager.queryAssetMeta(uuid!);
+            expect(assetMeta!.userData.testReimport).toStrictEqual(true);
+        });
+
+        it('子资源 url 的 reimport', async () => {
+            const parentUrl = 'db://internal/default_ui/default_toggle_disabled.png';
+            const subAssetUrl = `${parentUrl}/texture`;
+            await assetManager.reimportAsset(subAssetUrl);
+            expect(true).toBeTruthy();
+        });
+    });
+    describe('save-asset-meta', () => {
+        it('保存资源的 meta', async function () {
+            const uuid = await assetManager.queryUUID(`${TestGlobalEnv.testRootUrl}/${testName}`);
+
+            const metaJson = readJSONSync(join(databasePath, `${testName}.meta`));
+            metaJson.userData.test = true;
+
+            await await assetManager.saveAssetMeta(uuid!, metaJson);
+            const meta = await assetManager.queryAssetMeta(uuid!);
+
+            expect(meta!.userData.test).toStrictEqual(true);
+        });
+    });
+
+    describe('create-asset-by-type', () => {
+        // 导入共享的测试数据
+        const { CREATE_ASSET_TYPE_TEST_CASES } = require('../../../../tests/shared/asset-test-data');
+        const { validateAssetCreated, validateAssetFileExists, validateAssetMetaExists } = require('../../../../tests/shared/asset-test-helpers');
+
+        // 使用 test.each 批量测试所有资源类型
+        test.each(CREATE_ASSET_TYPE_TEST_CASES)(
+            '创建 $description ($type)',
+            async (...args: any[]) => {
+                const { type, ext, ccType, skipTypeCheck, templateName } = args[0];
+                const baseName = type;
+                const fileName = `${baseName}.${ext}`;
+                const assetInfo = await assetManager.createAssetByType(
+                    type as any,
+                    databasePath,
+                    baseName,
+                    {
+                        overwrite: true,
+                        templateName,
+                    }
+                );
+
+                expect(assetInfo).not.toBeNull();
+
+                // 使用共享的验证函数
+                validateAssetCreated(assetInfo, ccType, skipTypeCheck);
+                validateAssetFileExists(assetInfo!.file);
+                validateAssetMetaExists(join(databasePath, fileName));
+            }
+        );
+
+        it('创建 TypeScript 脚本 并传递 content', async () => {
+            const assetInfo = await assetManager.createAssetByType('typescript', databasePath, `${name}.ts`, {
+                content: 'console.log("Hello, World!");',
+            });
+            expect(assetInfo).not.toBeNull();
+            expect(assetInfo!.type).toEqual('cc.Script');
+            const content = readFileSync(assetInfo!.file, 'utf8');
+            expect(content).toEqual('console.log("Hello, World!");');
+        });
+
+        it('创建 texture-cube 时生成 .cubemap 文件而不是目录', async () => {
+            const assetInfo = await assetManager.createAssetByType(
+                'texture-cube' as any,
+                databasePath,
+                'texture-cube-file-check',
+                { overwrite: true }
+            );
+
+            expect(assetInfo).not.toBeNull();
+            expect(assetInfo!.type).toEqual('cc.TextureCube');
+            expect(assetInfo!.isDirectory).toBe(false);
+            expect(assetInfo!.file.endsWith('.cubemap')).toBe(true);
+            expect(statSync(assetInfo!.file).isFile()).toBe(true);
+            expect(statSync(assetInfo!.file).isDirectory()).toBe(false);
+        });
+    });
+
+    describe('concurrent-create-asset', () => {
+        it('并发创建资源（createAsset）- 10次并发', async function () {
+            const concurrentCount = 10;
+            
+            // 使用 map 创建10个并发的 createAsset 操作
+            const promises = Array.from({ length: concurrentCount }, (_, i) => {
+                const fileName = `${name}_concurrent_${i}.txt`;
+                return assetManager.createAsset({
+                    target: join(databasePath, fileName),
+                    content: `test content ${i}`,
+                    overwrite: true,
+                });
+            });
+
+            // 等待所有并发操作完成（使用 allSettled 可以捕获所有结果，包括失败）
+            const results = await Promise.allSettled(promises);
+
+            // 验证所有操作都成功
+            expect(results.length).toBe(concurrentCount);
+            results.forEach((result, index) => {
+                // 检查操作是否成功
+                expect(result.status).toBe('fulfilled');
+                
+                const asset = (result as PromiseFulfilledResult<any>).value;
+                expect(asset).not.toBeNull();
+                
+                const fileName = `${name}_concurrent_${index}.txt`;
+                expect(existsSync(join(databasePath, fileName))).toBeTruthy();
+                
+                // 验证内容
+                const content = readFileSync(join(databasePath, fileName), 'utf8');
+                expect(content).toEqual(`test content ${index}`);
+                
+                // 验证 meta 文件存在
+                expect(existsSync(join(databasePath, `${fileName}.meta`))).toBeTruthy();
+            });
+        });
+    });
+
+    describe('concurrent-create-asset-by-type', () => {
+        it('并发创建资源（createAssetByType）- 10次并发', async function () {
+            const concurrentCount = 10;
+            const testTypes: ISupportCreateType[] = ['typescript', 'animation-clip', 'directory', 'scene', 'prefab'];
+
+            // 使用 map 创建10个并发的 createAssetByType 操作
+            const promises = Array.from({ length: concurrentCount }, (_, i) => {
+                const type = testTypes[i % testTypes.length];
+                const baseName = `${name}_concurrent_by_type_${i}`;
+                
+                return assetManager.createAssetByType(
+                    type,
+                    databasePath,
+                    baseName,
+                    {
+                        overwrite: true,
+                    }
+                );
+            });
+
+            // 等待所有并发操作完成（使用 allSettled 可以捕获所有结果，包括失败）
+            const results = await Promise.allSettled(promises);
+
+            // 验证所有操作都成功
+            expect(results.length).toBe(concurrentCount);
+            results.forEach((result) => {
+                // 检查操作是否成功
+                expect(result.status).toBe('fulfilled');
+                
+                const assetInfo = (result as PromiseFulfilledResult<any>).value;
+                expect(assetInfo).not.toBeNull();
+                
+                // 验证文件存在
+                expect(existsSync(assetInfo!.file)).toBeTruthy();
+                
+                // 验证 meta 文件存在
+                const metaPath = `${assetInfo!.file}.meta`;
+                expect(existsSync(metaPath)).toBeTruthy();
+            });
+        });
+    });
+
+    describe('import-asset', () => {
+        it('导入外部文件到项目中', async function () {
+            // 创建一个临时测试文件
+            const tempFilePath = join(databasePath, `${name}_temp.txt`);
+            await outputFile(tempFilePath, 'import test content');
+
+            const targetName = `${name}_imported.txt`;
+            const assets = await assetManager.importAsset(tempFilePath, join(databasePath, targetName));
+
+            // 验证返回的是数组且包含一个资源
+            expect(Array.isArray(assets)).toBeTruthy();
+            expect(assets.length).toBeGreaterThan(0);
+
+            const asset = assets[0];
+            expect(asset).not.toBeNull();
+            expect(asset.isDirectory).toBeFalsy();
+
+            const targetPath = join(databasePath, targetName);
+            expect(existsSync(targetPath)).toBeTruthy();
+
+            const content = readFileSync(targetPath, 'utf8');
+            expect(content).toEqual('import test content');
+
+            // 清理临时文件
+            await remove(tempFilePath);
+        });
+
+        it('导入文件并覆盖已存在的资源', async function () {
+            // 先创建一个资源
+            const targetName = `${name}_overwrite.txt`;
+            await assetManager.createAsset({
+                target: join(databasePath, targetName),
+                content: 'original content',
+                overwrite: true,
+            });
+
+            // 创建临时源文件
+            const tempFilePath = join(databasePath, `${name}_temp2.txt`);
+            await outputFile(tempFilePath, 'new content');
+
+            // 导入并覆盖
+            const assets = await assetManager.importAsset(tempFilePath, join(databasePath, targetName));
+
+            // 验证返回的是数组
+            expect(Array.isArray(assets)).toBeTruthy();
+            expect(assets.length).toBeGreaterThan(0);
+
+            const targetPath = join(databasePath, targetName);
+            const content = readFileSync(targetPath, 'utf8');
+            expect(content).toEqual('new content');
+
+            // 清理临时文件
+            await remove(tempFilePath);
+        });
+
+        it('导入图片资源', async function () {
+            // 从 internal 复制一张图片作为源
+            const sourceImage = await assetManager.url2path('db://internal/default_ui/default_btn_normal.png');
+
+            const targetName = `${name}_imported.png`;
+            const assets = await assetManager.importAsset(sourceImage, join(databasePath, targetName));
+
+            // 验证返回的是数组且包含资源
+            expect(Array.isArray(assets)).toBeTruthy();
+            expect(assets.length).toBeGreaterThan(0);
+
+            const asset = assets[0];
+            expect(asset).not.toBeNull();
+            expect(asset.type).toEqual('cc.ImageAsset');
+
+            const targetPath = join(databasePath, targetName);
+            expect(existsSync(targetPath)).toBeTruthy();
+
+            const metaExists = existsSync(join(databasePath, `${targetName}.meta`));
+            expect(metaExists).toBeTruthy();
+        });
+
+        it('导入文件夹', async function () {
+            // 创建一个临时文件夹和文件
+            const tempDirPath = join(databasePath, `${name}_temp_dir`);
+            await outputFile(join(tempDirPath, 'file1.txt'), 'content1');
+            await outputFile(join(tempDirPath, 'file2.txt'), 'content2');
+
+            const targetDirName = `${name}_imported_dir`;
+            const assets = await assetManager.importAsset(tempDirPath, join(databasePath, targetDirName));
+
+            // 验证返回的是数组，包含文件夹和所有子文件
+            expect(Array.isArray(assets)).toBeTruthy();
+            expect(assets.length).toBeGreaterThan(0);
+
+            const targetPath = join(databasePath, targetDirName);
+            expect(existsSync(targetPath)).toBeTruthy();
+            expect(existsSync(join(targetPath, 'file1.txt'))).toBeTruthy();
+            expect(existsSync(join(targetPath, 'file2.txt'))).toBeTruthy();
+
+            // 清理临时文件夹
+            await remove(tempDirPath);
+        });
+    });
+
+    // it('refresh-all-database', async () => {
+    //     let resultResolve: null | Function = null;
+    //     function test() {
+    //         resultResolve && resultResolve(true);
+    //         assetDBManager.removeListener('asset-db:refresh-finish', test);
+    //     }
+    //     const result = new Promise((resolve) => {
+    //         resultResolve = resolve;
+    //     });
+    //     assetDBManager.on('asset-db:refresh-finish', test);
+    //     // 删除 effect.bin 的缓存
+    //     const effectBin = join(TestGlobalEnv.projectRoot, 'temp', 'asset-db', 'effect/effect.bin');
+    //     removeSync(effectBin);
+    //     await assetDBManager.refresh();
+    //     // 刷新资源后，需要重新生成 effect.bin
+
+    //     expect(await result).toBeTruthy();
+    //     expect(existsSync(effectBin)).toBeTruthy();
+    // });
+
+    // describe('rename-asset', () => {
+    //     it('重命名文件夹', async function() {
+    //         await await assetManager.renameAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${name}.directory`,
+    //             `${TestGlobalEnv.testRootUrl}/${name}rename.directory`,
+    //         );
+
+    //         const exists = existsSync(join(databasePath, `${name}.directory`));
+    //         expect(exists).toStrictEqual(false);
+
+    //         const exists2 = existsSync(join(databasePath, `${name}rename.directory`));
+    //         expect(exists2).toStrictEqual(true);
+
+    //         const stat = statSync(join(databasePath, `${name}rename.directory`));
+    //         expect(stat.isDirectory()).toStrictEqual(true);
+    //     });
+
+    //     it('重命名普通资源', async function() {
+    //         await await assetManager.renameAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${name}.normal`,
+    //             `${TestGlobalEnv.testRootUrl}/${name}.normal2`,
+    //         );
+
+    //         const exists = existsSync(join(databasePath, `${name}.normal`));
+    //         expect(exists).toStrictEqual(false);
+
+    //         const exists2 = existsSync(join(databasePath, `${name}.normal2`));
+    //         expect(exists2).toStrictEqual(true);
+
+    //         const stat = statSync(join(databasePath, `${name}.normal2`));
+    //         expect(stat.isDirectory()).toStrictEqual(false);
+
+    //         // move 传出的是一个 bool，不是预期的 uuid
+    //         // const meta = readJSONSync(join(databasePath, `${name}.normal3.meta`));
+    //         // expect(meta.uuid).toStrictEqual(uuid);
+
+    //         const content = readFileSync(join(databasePath, `${name}.normal2`), 'utf8');
+    //         expect(content).toStrictEqual('test2');
+    //     });
+
+    //     it('大小写差异的重命名资源', async function() {
+    //         const testName1 = name;
+    //         const testName2 = name + 'a';
+    //         await await assetManager.renameAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${testName1}.normal2`,
+    //             `${TestGlobalEnv.testRootUrl}/${testName2}.normal2`,
+    //         );
+
+    //         const testName1Uuid = await assetManager.queryUUID(join(databasePath, `${testName1}.normal2`));
+    //         expect(!!testName1Uuid).toStrictEqual(false);
+
+    //         const testName2Uuid = await assetManager.queryUUID(join(databasePath, `${testName2}.normal2`));
+    //         expect(!!testName2Uuid).toStrictEqual(true);
+
+    //         const metaExist = existsSync(join(databasePath, `${testName2}.normal2.meta`));
+    //         expect(metaExist).toStrictEqual(true);
+
+    //         const content = readFileSync(join(databasePath, `${testName2}.normal2`), 'utf8');
+    //         expect(content).toStrictEqual('test2');
+    //     });
+
+    //     it('重命名资源但实际为移动文件', async function() {
+    //         const testName1 = name + 'a';
+    //         const testName2 = name;
+    //         await await assetManager.renameAsset(
+    //             `${TestGlobalEnv.testRootUrl}/${testName1}.normal2`,
+    //             `${TestGlobalEnv.testRootUrl}/move/${testName2}.normal2`,
+    //         );
+
+    //         const exists = existsSync(join(databasePath, `${testName1}.normal2`));
+    //         expect(exists).toStrictEqual(false);
+
+    //         const exists2 = existsSync(join(databasePath, `move/${testName2}.normal2`));
+    //         expect(exists2).toStrictEqual(true);
+
+    //         const content = readFileSync(join(databasePath, `move/${testName2}.normal2`), 'utf8');
+    //         expect(content).toStrictEqual('test2');
+    //     });
+    // });
+
+    // TODO 
+    // describe('new-asset', () => {
+    //     // 1. 验证所有开放出去的新建菜单可以正常创建（已在 query.spec 内验证），主要验证包含模板的相关功能
+    //     // 2. 验证 url + content 的创建，(已在 create-asset 处验证)
+    //     // 3. 验证传递 userData/uuid/overwrite/rename 等附加参数的生效情况
+
+    //     it('创建普通资源 overwrite', async function() {
+    //         const uuid = utils.UUID.generate(false);
+    //         const assetUrl = `${TestGlobalEnv.testRootUrl}/${name}.normal`;
+    //         const asset = await assetManager.createAsset({
+    //             target: assetUrl,
+    //             content: 'new-asset',
+    //             overwrite: true,
+    //             uuid,
+    //             userData: {
+    //                 test: 2,
+    //             },
+    //         });
+
+    //         // UUID 需要与指定的一致
+    //         expect(asset && asset.uuid).toStrictEqual(uuid);
+
+    //         // 指定 userData 生效
+    //         const meta = readJSONSync(join(databasePath, `${name}.normal.meta`));
+    //         expect(meta.userData.test).toEqual(2);
+
+    //         // overwrite 生效，正确修改文件内容
+    //         const content = readFileSync(join(databasePath, `${name}.normal`), 'utf8');
+    //         expect(content).toStrictEqual('new-asset');
+    //     });
+
+    //     it('创建空文件 cubemap', async () => {
+    //         const assetUrl = `${TestGlobalEnv.testRootUrl}/${name}.cubemap`;
+    //         const asset = await assetManager.createAsset({
+    //             target: assetUrl,
+    //             content: '',
+    //         });
+
+    //         expect(asset && asset.type).toEqual('cc.TextureCube');
+    //     });
+
+    //     it('创建空文件夹', async () => {
+    //         const assetUrl = `${TestGlobalEnv.testRootUrl}/${name}_folder`;
+    //         const asset = await assetManager.createAsset({
+    //             target: assetUrl,
+    //         });
+    //         expect(asset && asset.isDirectory).toBeTruthy();
+    //     });
+
+    //     it('同时传递 content 与 template 时，优先使用 content', async () => {
+    //         const assetUrl = `${TestGlobalEnv.testRootUrl}/${name}.custom`;
+    //         const asset = await assetManager.createAsset({
+    //             target: assetUrl,
+    //             content: 'test',
+    //             template: 'db://internal/default_file_content/auto-atlas/default.pac',
+    //         });
+    //         expect(asset && extname(asset.file)).toEqual('.custom');
+    //         expect(asset && readFileSync(asset.file, 'utf-8')).toEqual('test');
+    //     });
+
+    // });
+
+    // describe('import-asset', () => {
+    //     // 把外部文件拷贝到 assets 指定目录下，并且导入刷新
+    //     // 导入文件
+    //     // 导入文件夹
+    // });
+
+    // describe('generate-available-url', () => {
+    //     // 类似 getName 的作用
+
+    //     it('db://internal/default_ui 作为目标路径自动更名', async () => {
+    //         const testUrl = 'db://internal/default_ui';
+    //         const validUrl = await assetManager.generateAvailableURL(testUrl);
+    //         expect(testUrl).not.toEqual(validUrl);
+    //     });
+    // });
+
+    // describe('update-default-user-data', () => {
+    //     const defaultMetaPath = join(TestGlobalEnv.projectRoot, '.creator/default-meta.json');
+    //     let testImageType = 'texture';
+    //     let testTrimType = 'none';
+    //     if (existsSync(defaultMetaPath)) {
+    //         it('获取用户本地导入配置数据，验证接口查询结果适合正常', async () => {
+    //             const info = readJsonSync(defaultMetaPath);
+    //             const assetConfigMap = await assetManager.queryAssetConfigMap();
+    //             Object.keys(info).forEach((assetHandlerName) => {
+    //                 if (!assetConfigMap[assetHandlerName] || !Object.keys(info[assetHandlerName])) {
+    //                     return;
+    //                 }
+    //                 Object.keys(info[assetHandlerName]).forEach((type) => {
+    //                     const { userDataConfig } = assetConfigMap[assetHandlerName];
+    //                     it(`验证 ${assetHandlerName} ${type} 的默认值 ${userDataConfig![type].default} 是否与用户文件内容 ${info[assetHandlerName][type]}一致 `, (() => {
+    //                         expect(userDataConfig![type].default).toEqual(info[assetHandlerName][type]);
+    //                     }));
+    //                 });
+    //             });
+
+    //             // 根据用户本地配置，修改类型，方便验证是否正确修改
+    //             if (info.image?.type === testImageType) {
+    //                 testImageType = 'sprite-frame';
+    //             }
+    //             if (info['sprite-frame']?.trimType === testTrimType) {
+    //                 testTrimType = 'custom';
+    //             }
+    //         });
+    //     }
+
+    //     it(`更新 image 的默认导入类型为 ${testImageType}`, async () => {
+    //         await assetManager.updateDefaultUserData('image', 'type', testImageType);
+
+    //         test.each([
+    //           `验证拷贝的 image 的导入类型为 ${testImageType}`, async () => {
+    //                 // 拷贝一张图到编辑器内并导入，获取到的导入类型与配置的一致
+    //                 const testImage = await assetManager.url2path('db://internal/default_ui/default_btn_disabled.png');
+    //                 const testImageDest = join(databasePath, 'testImage.png');
+    //                 await copy(testImage, testImageDest);
+    //                 await assetManager.refreshAsset(testImageDest);
+    //                 const assetMeta = await assetManager.queryAssetMeta(testImageDest);
+    //                 expect(assetMeta!.userData.type).toEqual(testImageType);
+    //             }, 
+    //             '验证实际写入文件的内容修改正常', () => {
+    //                 expect(readJSONSync(defaultMetaPath).image.type).toEqual(testImageType);
+    //             },
+    //         ]);
+
+    //     });
+
+    //     it(`更新 sprite-frame 的 trim type 类型为 ${testTrimType}`, async () => {
+    //         await assetManager.updateDefaultUserData('sprite-frame', 'trimType', testTrimType);
+    //         expect(readJSONSync(defaultMetaPath)['sprite-frame'].trimType).toEqual(testTrimType);
+    //     });
+    // });
+
+    // 旧版本使用，新版本已不再使用
+    // describe('refresh-default-user-data-config', () => {
+
+    // });
+
+    // init-asset create-asset-dialog
+    // update-config
+
+    afterAll(async () => {
+        // 先通过资源数据库 API 删除资源（会正确处理异步任务）
+        try {
+            await assetManager.removeAsset(TestGlobalEnv.testRootUrl);
+        } catch (e) {
+            console.error('清理测试资源失败:', e);
+        }
+
+        // 等待一小段时间确保所有异步任务完成
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        // 最后清理残留文件
+        if (existsSync(TestGlobalEnv.testRoot)) {
+            await remove(TestGlobalEnv.testRoot);
+        }
+        if (existsSync(TestGlobalEnv.testRoot + '.meta')) {
+            await remove(TestGlobalEnv.testRoot + '.meta');
+        }
+    });
+});

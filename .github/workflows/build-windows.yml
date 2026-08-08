@@ -81,6 +81,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cocos-cli-win
+          # .publish 是点开头的隐藏目录，默认 glob 会跳过隐藏文件，必须显式开启
+          include-hidden-files: true
           path: |
             .publish/*.zip
             .publish/*.txt
@@ -123,16 +125,17 @@ jobs:
             echo "::warning::未找到 ZIP，跳过创建 Release"
             exit 0
           fi
-          # 已存在的 Release（如重跑）则更新资产与说明，否则新建
+          # 已存在的 Release（如重跑）则更新资产与说明，否则新建；
+          # GitHub Release 单文件上限 2GB，失败不阻断任务（Artifact 已上传）。
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$ZIP" --clobber
-            gh release edit "$TAG" --notes-file "$NOTES_FILE" --prerelease
+            gh release upload "$TAG" "$ZIP" --clobber || echo "::warning::Release 资产上传失败（可能超 2GB 限制）"
+            gh release edit "$TAG" --notes-file "$NOTES_FILE" --prerelease || echo "::warning::Release 说明更新失败"
             echo "::notice::已更新 Release $TAG 资产: $ZIP"
           else
             gh release create "$TAG" "$ZIP" \
               --title "cocos-cli $TAG (Windows)" \
               --notes-file "$NOTES_FILE" \
-              --prerelease
+              --prerelease || echo "::warning::Release 创建失败（可能文件超 2GB 限制）"
             echo "::notice::已创建 Release $TAG: $ZIP"
           fi
 

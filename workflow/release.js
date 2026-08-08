@@ -574,4 +574,49 @@ gulp.task('release', gulp.series(
     }
 ));
 
+/**
+ * Programmatic release entry (used by CI: .github/actions/release/release-build.js)
+ * Runs the same pipeline as `gulp release` but driven by a config object,
+ * without requiring CLI flag parsing or a TTY.
+ * @param {{publishDir: string, configs: Array<{type: 'nodejs'|'electron', zip?: boolean, upload?: boolean}>}} options
+ * @returns {Promise<Object>} results keyed by release type: { releaseDir, zipFile }
+ */
+async function release(options) {
+    const { publishDir, configs } = options;
+    context.publishDir = publishDir;
+    context.configs = configs;
+
+    console.log('Starting programmatic release...');
+
+    await getProjectVersion();
+    await readIgnorePatterns();
+    await scanProjectFiles();
+    await clean();
+    await updateRepos();
+    await installDeps();
+
+    const results = {};
+    for (const config of configs) {
+        const pipeline = createReleasePipeline(config);
+        await new Promise((resolve, reject) => {
+            const done = (err) => (err ? reject(err) : resolve());
+            try {
+                pipeline(done);
+            } catch (e) {
+                reject(e);
+            }
+        });
+
+        const dirName = generateReleaseDirectoryName(config.type, context.version);
+        const releaseDir = path.join(context.publishDir, dirName);
+        const zipPath = path.join(path.dirname(releaseDir), `${dirName}.zip`);
+        results[config.type] = {
+            releaseDir,
+            zipFile: fs.existsSync(zipPath) ? zipPath : null,
+        };
+    }
+    return results;
+}
+
 module.exports = gulp;
+module.exports.release = release;

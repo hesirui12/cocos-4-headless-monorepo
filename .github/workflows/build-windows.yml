@@ -1,0 +1,118 @@
+# =============================================
+# Windows 版 cocos-cli 云端打包
+#
+# 触发方式：
+#   1. 手动触发：Actions 页面 → Run workflow
+#   2. 推送 tag：git tag v1.2.3 && git push origin v1.2.3
+#      （tag 触发时自动创建 GitHub Release 并挂上 zip）
+#
+# 产物：
+#   - .publish/cocos-cli-win-<时间戳>-<版本>/   （发布目录）
+#   - .publish/cocos-cli-win-<时间戳>-<版本>.zip （便携发布包，含 dist + 生产依赖 + 工具 + 引擎源码）
+#   - Actions 页面可下载（Artifacts）；tag 触发时附加到 GitHub Release
+#
+# 注意：整条流水线较重（引擎编译 + 全量构建 + 打包 zip），预计 1~2 小时。
+# =============================================
+
+name: Build Windows Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: 打包 Windows 版 cocos-cli
+    runs-on: windows-latest
+    timeout-minutes: 300
+    env:
+      # postinstall 里"是否强制更新"的交互询问改为直接强制，保证 CI 确定性
+      FORCE_UPDATE: 'true'
+      CI: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js (22.17.0, from .node-version)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Setup environment（init + 安装依赖 + 构建）
+        uses: ./.github/actions/setup-env
+
+      - name: Release build（nodejs 发布包 + ZIP）
+        id: release
+        uses: ./.github/actions/release
+        with:
+          publish-dir: .publish
+          nodejs: 'true'
+          electron: 'false'
+          create-zip: 'true'
+          upload: 'false'
+
+      - name: Check release result
+        shell: bash
+        run: |
+          if [ "${{ steps.release.outputs.release_success }}" != "true" ]; then
+            echo "::error::Release 构建失败，请查看上方 release 步骤日志"
+            exit 1
+          fi
+          echo "✅ release_success=true"
+
+      - name: Upload artifact（Actions 页面可下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: cocos-cli-win
+          path: |
+            .publish/*.zip
+            .publish/*.txt
+            .publish/cocos-cli-win-*/
+          if-no-files-found: error
+
+      - name: Create GitHub Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ZIP=$(ls .publish/cocos-cli-win-*.zip 2>/dev/null | head -1 || true)
+          if [ -z "$ZIP" ]; then
+            echo "::warning::未找到 ZIP，跳过创建 Release"
+            exit 0
+          fi
+          # 已存在的 Release（如重跑）则更新资产，否则新建
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+            echo "::notice::已更新 Release $GITHUB_REF_NAME 资产: $ZIP"
+          else
+            gh release create "$GITHUB_REF_NAME" "$ZIP" \
+              --title "cocos-cli $GITHUB_REF_NAME (Windows)" \
+              --generate-notes
+            echo "::notice::已创建 Release $GITHUB_REF_NAME: $ZIP"
+          fi
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## 📦 Windows 打包结果" >> "$GITHUB_STEP_SUMMARY"
+          if ls .publish/cocos-cli-win-*.zip >/dev/null 2>&1; then
+            ls -lh .publish/cocos-cli-win-*.zip | awk '{print "- `" $NF "`（" $5 "）"}' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- ⚠️ 未生成 ZIP" >> "$GITHUB_STEP_SUMMARY"
+          fi

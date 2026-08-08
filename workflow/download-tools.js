@@ -256,20 +256,32 @@ class ToolDownloader {
         console.log(`📦 解压: ${path.basename(zipPath)}`);
 
         try {
-            let command , options = {};
+            // 统一超时（10 分钟），防止解压卡死导致流程无限挂起
+            const options = {
+                stdio: 'pipe',
+                maxBuffer: 1024 * 1024 * 50, // 50MB，防止解压输出撑爆缓冲区
+                timeout: 600000 // 10 分钟
+            };
+
             if (this.platform === 'win32') {
-                // Windows 使用 PowerShell 的 Expand-Archive
-                command = `powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force"`;
+                // Windows 优先用 7zip-bin（7za）解压：比 PowerShell Expand-Archive 快数十倍且稳定
+                try {
+                    const sevenBin = require('7zip-bin');
+                    const sevenPath = sevenBin.path7za;
+                    if (fs.existsSync(sevenPath)) {
+                        execSync(`"${sevenPath}" x "${zipPath}" -o"${extractDir}" -y`, options);
+                        console.log(`✅ 解压完成: ${path.basename(zipPath)}`);
+                        return;
+                    }
+                } catch (e) {
+                    console.warn(`⚠️  7za 解压失败，回退 Expand-Archive: ${e.message}`);
+                }
+                // 回退：PowerShell Expand-Archive
+                execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force"`, options);
             } else {
                 // macOS/Linux 使用 unzip
-                command = `unzip -o '${zipPath}' -d '${extractDir}'`;
-                // 增加缓冲区大小
-                options = {
-                    maxBuffer: 1024 * 1024 * 50 // 增加到 50MB，防止解压失败
-                };
+                execSync(`unzip -o '${zipPath}' -d '${extractDir}'`, options);
             }
-
-            execSync(command, { stdio: 'pipe', ...options });
             console.log(`✅ 解压完成: ${path.basename(zipPath)}`);
         } catch (error) {
             throw new Error(`解压失败: ${error.message}`);
@@ -289,6 +301,11 @@ class ToolDownloader {
     checkExtractTools() {
         try {
             if (this.platform === 'win32') {
+                // 优先检查 7za（7zip-bin），回退检查 PowerShell Expand-Archive
+                try {
+                    const sevenPath = require('7zip-bin').path7za;
+                    if (fs.existsSync(sevenPath)) return true;
+                } catch { /* fall through */ }
                 execSync('powershell -Command "Get-Command Expand-Archive"', { stdio: 'pipe' });
             } else {
                 execSync('which unzip', { stdio: 'pipe' });

@@ -91,19 +91,45 @@ jobs:
         run: |
           set -euo pipefail
           ZIP=$(ls .publish/cocos-cli-win-*.zip 2>/dev/null | head -1 || true)
+          TAG="$GITHUB_REF_NAME"
+
+          # 版本说明（CLI / Engine）
+          CLI_VERSION=$(node -p "require('./package.json').version")
+          ENGINE_VERSION=$(node -p "require('./packages/engine/package.json').version")
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "## 📦 版本信息"
+            echo ""
+            echo "- **CLI** (cocos-4-headless-monorepo): \`$CLI_VERSION\`"
+            echo "- **Engine** (cocos-creator): \`$ENGINE_VERSION\`"
+            echo "- **平台**: Windows (windows-latest 构建)"
+            echo ""
+            echo "## 🚀 安装 / 使用"
+            echo ""
+            echo "1. 下载下方 zip 资产并解压（含 dist + 生产依赖 + 工具 + 引擎源码）"
+            echo "2. 需要 [Node.js 22](https://nodejs.org/)（与构建版本一致）"
+            echo "3. 运行：\`node dist/cli.js --help\`，或 \`npm i -g\` 安装为全局命令 \`cocos\`"
+            echo ""
+            echo "## 📋 本次变更"
+            echo ""
+            git log --oneline -20 --no-merges
+          } > "$NOTES_FILE"
+
           if [ -z "$ZIP" ]; then
             echo "::warning::未找到 ZIP，跳过创建 Release"
             exit 0
           fi
-          # 已存在的 Release（如重跑）则更新资产，否则新建
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
-            echo "::notice::已更新 Release $GITHUB_REF_NAME 资产: $ZIP"
+          # 已存在的 Release（如重跑）则更新资产与说明，否则新建
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" --clobber
+            gh release edit "$TAG" --notes-file "$NOTES_FILE" --prerelease
+            echo "::notice::已更新 Release $TAG 资产: $ZIP"
           else
-            gh release create "$GITHUB_REF_NAME" "$ZIP" \
-              --title "cocos-cli $GITHUB_REF_NAME (Windows)" \
-              --generate-notes
-            echo "::notice::已创建 Release $GITHUB_REF_NAME: $ZIP"
+            gh release create "$TAG" "$ZIP" \
+              --title "cocos-cli $TAG (Windows)" \
+              --notes-file "$NOTES_FILE" \
+              --prerelease
+            echo "::notice::已创建 Release $TAG: $ZIP"
           fi
 
       - name: Job summary

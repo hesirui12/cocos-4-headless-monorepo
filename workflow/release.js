@@ -474,6 +474,10 @@ function createReleasePipeline(config) {
 
     const test = async () => {
         if (config.type === 'nodejs') {
+            if (process.env.RELEASE_SKIP_E2E === 'true') {
+                console.log('⏭️  Skipping e2e test (RELEASE_SKIP_E2E=true)');
+                return;
+            }
             await runCommand('npm', ['run', `test:e2e -- --cli ${extensionDir()}/dist/cli.js`], { cwd: context.rootDir });
         }
     };

@@ -11,8 +11,8 @@
 .DS_Store
 .temp
 
-# tsconfig
-tsconfig.tsbuildinfo
+# tsconfig 增量编译缓存
+**/*.tsbuildinfo
 
 # node 模块
 **/node_modules/
@@ -25,6 +25,7 @@ packages/engine/scripts/native-pack-tool/dist/
 packages/engine/DebugInfos.json
 packages/engine/native/tools/swig/bin/
 packages/engine/native/tools/bindings-generator/dist/
+packages/engine/native/tools/bindings-generator/libclang/
 
 # packages
 packages/cc-module/editor

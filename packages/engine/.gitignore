@@ -9,7 +9,6 @@
 .history
 .DS_Store
 
-lib
 build
 aspnet_client
 node_modules
